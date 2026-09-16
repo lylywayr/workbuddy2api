@@ -59,7 +59,7 @@ func main() {
 	p.SetBreaker(cfg.Pool.BreakerThreshold, cfg.BreakerCooldownDur, cfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域在途分档（WAF 403 修复 P1-1，默认 2）
-	p.SetSoftRateMax(cfg.SoftRateMaxDur) // 软冷却指数退避封顶（soft_rate_max，默认 2h）
+	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 
 	// 会话粘性路由（可配关闭）。
@@ -173,16 +173,18 @@ func main() {
 	}
 
 	h := server.NewHandler(server.Config{
-		Pool:         p,
-		Upstream:     up,
-		APIKey:       cfg.APIKey,
-		Session:      sessRouter,
-		StickyCount:  sessCount,
-		RedisMode:    redisMode,
-		SoftCooldown: cfg.SoftRateDur,
-		PromptMode:   cfg.Prompt.Mode,
-		PromptText:   cfg.PromptText,
-		MaxBodyBytes: int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
+		Pool:                p,
+		Upstream:            up,
+		APIKey:              cfg.APIKey,
+		Session:             sessRouter,
+		StickyCount:         sessCount,
+		RedisMode:           redisMode,
+		SoftCooldown:        cfg.SoftRateDur,
+		PromptMode:          cfg.Prompt.Mode,
+		PromptText:          cfg.PromptText,
+		MaxBodyBytes:        int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
+		AutoContinueEnabled: cfg.Upstream.AutoContinue.Enabled,
+		AutoContinueMax:     cfg.Upstream.AutoContinue.Max,
 		// global realm 开关（handler 侧第三道闸：modelList 据此决定是否列 global 名单）。
 		GlobalEnabled: cfg.Global.Enabled,
 	})

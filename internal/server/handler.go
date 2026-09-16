@@ -46,6 +46,11 @@ type Config struct {
 	// PromptText custom 模式下注入的系统提示词文本（来自 config.PromptText）。
 	PromptText string
 
+	// AutoContinue 透明自动续接配置：默认关闭。仅对 stream 请求的明确输出上限
+	// 截断纯文本轮次生效，Max 是追加轮数（运行时硬上限 3）。
+	AutoContinueEnabled bool
+	AutoContinueMax     int
+
 	// GlobalEnabled global realm 路由开关（config global.enabled，缺省 true）。
 	// handler 侧第三道闸（与 main 注入 auth 开关、upstream.GlobalEnabled 呼应）：
 	// false（显式逃生门）时即便 auth realm=global 也不提供 global: 模型名
@@ -95,6 +100,13 @@ func NewHandler(cfg Config) *Handler {
 	}
 	if cfg.MaxBodyBytes <= 0 {
 		cfg.MaxBodyBytes = 8 << 20 // 请求体上限兜底 8MB
+	}
+	if !cfg.AutoContinueEnabled {
+		cfg.AutoContinueMax = 0
+	} else if cfg.AutoContinueMax <= 0 {
+		cfg.AutoContinueMax = 2
+	} else if cfg.AutoContinueMax > 3 {
+		cfg.AutoContinueMax = 3
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -727,21 +739,70 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if peek.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
+			// 自动续接仍占用同一账号租约，直到所有追加轮次完成；仅明确 output-limit
+			// 的纯文本轮次才会在同一 SSE 响应内继续请求。
 			st.status = http.StatusOK
 			stats := newChatStatsReaderSince(rc, st.start)
-			_ = upstream.Stream(w, stats)
+			var streamResult upstream.AutoContinueResult
+			var streamErr error
+			if h.cfg.AutoContinueEnabled && h.cfg.AutoContinueMax > 0 {
+				continuationBody := body
+				streamResult, streamErr = upstream.StreamAutoContinueWithResult(w, stats, upstream.AutoContinueOptions{
+					Max:     h.cfg.AutoContinueMax,
+					Context: r.Context(),
+					Next: func(turn upstream.StreamOutcome) (io.ReadCloser, error) {
+						nextBody, err := upstream.BuildContinuationBody(continuationBody, turn)
+						if err != nil {
+							return nil, err
+						}
+						continuationBody = nextBody
+						nextRC, nextStatus, nextRespBody, nextTerr := h.cfg.Upstream.ChatStreamContext(
+							r.Context(), acct, nextBody, clientIP, chatMeta)
+						if nextTerr != nil {
+							return nil, nextTerr
+						}
+						if nextStatus >= 400 {
+							return nil, &upstream.Error{
+								Kind:   upstream.Classify(nextStatus, string(nextRespBody)),
+								Status: nextStatus,
+								Msg:    string(nextRespBody),
+							}
+						}
+						if nextRC == nil {
+							return nil, fmt.Errorf("continuation upstream returned no stream")
+						}
+						return nextRC, nil
+					},
+				})
+			} else {
+				streamErr = upstream.Stream(w, stats)
+			}
 			st.ttfb = stats.TTFB()
-			st.toks, _ = stats.Tokens()
-			// 成本账本：末帧 usage 带 credit 与 token 总数时记录实测单价，
-			// 供下次选号把免费/便宜的号排在前面。
-			if credit, ok := stats.Credit(); ok {
+			if streamResult.HasUsage {
+				st.toks = streamResult.CompletionTokens
+			} else {
+				st.toks, _ = stats.Tokens()
+			}
+			// 成本账本：自动续接累计各轮 usage；关闭时沿用原始末帧统计。
+			if streamResult.HasUsage {
+				if streamResult.HasCredit {
+					h.cfg.Pool.NoteModelCost(acct.UID, bareModel, streamResult.Credit,
+						streamResult.PromptTokens+streamResult.CompletionTokens)
+				} else {
+					log.Printf("WARN: [server] stream usage without credit uid=%s model=%s (no cost observation)", logfmt.UID8(acct.UID), bareModel)
+				}
+			} else if credit, ok := stats.Credit(); ok {
 				h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, stats.TotalTokens())
 			} else if _, hasUsage := stats.Tokens(); hasUsage {
 				// R9(c) 防护观测：usage 存在但 credit 缺失（如 global SSE 末帧未带 credit）。
-				// 不算合法成本观测（缺失≠0），仅记一条 WARN 协助排障，绝不写入账本。
 				log.Printf("WARN: [server] stream usage without credit uid=%s model=%s (no cost observation)", logfmt.UID8(acct.UID), bareModel)
 			}
-			rc.Close()
+			if streamErr != nil {
+				// SSE headers/body 已经发给客户端，不能再改 HTTP 状态；保留 DONE 收尾并记录。
+				log.Printf("WARN: [server] stream ended with error uid=%s: %v", logfmt.UID8(acct.UID), streamErr)
+			}
+			_ = stats.Close()
+			// Stream/StreamAutoContinue 已负责关闭各轮上游 body。
 			return
 		}
 		resp, err := upstream.Aggregate(rc)

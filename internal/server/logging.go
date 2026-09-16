@@ -61,14 +61,27 @@ type chatStatsReader struct {
 	hasUsage  bool // 末帧是否带 usage
 	hasCredit bool // 是否出现过带 credit 的 usage（缺失≠0，见 Credit() 注释）
 	tokens    int
-	credit    float64 // 末帧 usage.credit（本次真实扣费，供成本账本）
-	prompt    int     // 末帧 usage.prompt_tokens（与 completion 合计折算单价）
-	pend      []byte  // 已读未返回的行缓存
+	credit    float64   // 末帧 usage.credit（本次真实扣费，供成本账本）
+	prompt    int       // 末帧 usage.prompt_tokens（与 completion 合计折算单价）
+	pend      []byte    // 已读未返回的行缓存
+	closer    io.Closer // 底层上游 body（若有），供续接器及时释放连接
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
 func newChatStatsReaderSince(r io.Reader, since time.Time) *chatStatsReader {
-	return &chatStatsReader{br: bufio.NewReaderSize(r, 64*1024), start: since}
+	s := &chatStatsReader{br: bufio.NewReaderSize(r, 64*1024), start: since}
+	if c, ok := r.(io.Closer); ok {
+		s.closer = c
+	}
+	return s
+}
+
+// Close 释放统计读取器包裹的上游 body；统计本身不吞掉关闭错误。
+func (s *chatStatsReader) Close() error {
+	if s.closer != nil {
+		return s.closer.Close()
+	}
+	return nil
 }
 
 // TTFB 返回首个 data 帧到达耗时；无帧时为 0。

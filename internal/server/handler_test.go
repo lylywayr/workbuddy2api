@@ -2410,3 +2410,41 @@ func TestContentBlockedCustomIgnoresActiveDegrade(t *testing.T) {
 		t.Errorf("custom request must NOT use Degraded prompt even in degrade period: %s", out)
 	}
 }
+
+func TestChatAutoContinueEndToEnd(t *testing.T) {
+	first := `data: {"id":"a","choices":[{"index":0,"delta":{"role":"assistant","content":"前"}}]}` + "\n\n" +
+		`data: {"id":"a","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"credit":0.2}}` + "\n\n" + "data: [DONE]\n\n"
+	second := `data: {"id":"b","choices":[{"index":0,"delta":{"content":"后"}}]}` + "\n\n" +
+		`data: {"id":"b","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"credit":0.3}}` + "\n\n" + "data: [DONE]\n\n"
+	var mu sync.Mutex
+	var bodies [][]byte
+	up := &upstream.Client{HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, append([]byte(nil), body...))
+		n := len(bodies)
+		mu.Unlock()
+		if n == 1 {
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(first))}, nil
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(second))}, nil
+	})}, ChatBaseCN: "https://fake.example"}
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}), Upstream: up, AutoContinueEnabled: true, AutoContinueMax: 1})
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || strings.Count(rec.Body.String(), "data: [DONE]") != 1 || !strings.Contains(rec.Body.String(), `"content":"前"`) || !strings.Contains(rec.Body.String(), `"content":"后"`) {
+		t.Fatalf("code=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("upstream calls=%d", len(bodies))
+	}
+	var secondBody map[string]any
+	if err := json.Unmarshal(bodies[1], &secondBody); err != nil {
+		t.Fatal(err)
+	}
+	msgs := secondBody["messages"].([]any)
+	if len(msgs) != 3 || msgs[1].(map[string]any)["role"] != "assistant" {
+		t.Fatalf("continuation messages=%#v", msgs)
+	}
+}

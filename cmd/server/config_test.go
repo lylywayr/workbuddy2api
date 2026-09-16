@@ -731,3 +731,28 @@ func TestUpstreamUserAgentConfig(t *testing.T) {
 		t.Errorf("env user_agent=%q want EnvAgent/9", c3.Upstream.UserAgent)
 	}
 }
+
+func TestAutoContinueConfigDefaultsDisabled(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Upstream.AutoContinue.Enabled || c.Upstream.AutoContinue.Max != 0 {
+		t.Fatalf("default auto_continue=%+v want disabled", c.Upstream.AutoContinue)
+	}
+}
+
+func TestAutoContinueConfigEnabledAndCapped(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	if err := os.WriteFile(fp, []byte(`{"upstream":{"auto_continue":{"enabled":true,"max":99}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Upstream.AutoContinue.Enabled || c.Upstream.AutoContinue.Max != 3 {
+		t.Fatalf("auto_continue=%+v want enabled max=3", c.Upstream.AutoContinue)
+	}
+}

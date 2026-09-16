@@ -33,6 +33,10 @@
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300,
+    "auto_continue": {
+      "enabled": false,
+      "max": 2
+    },
     "user_agent": "",
     "client_version": "",
     "cli_version": "",

@@ -74,7 +74,13 @@ type Config struct {
 		// 2.137.1）；显式配置则随配置走。
 		CliVersion string `json:"cli_version"`
 
-		// DeviceToken 设备风控 Token（X-Device-Token 头）全局兜底。
+		// AutoContinue 透明自动续接：默认关闭。启用后仅对明确 finish_reason=length
+		// 的纯文本流追加请求；max 为追加轮数，运行时还有硬上限 3。
+		AutoContinue struct {
+			Enabled bool `json:"enabled"`
+			Max     int  `json:"max"`
+		} `json:"auto_continue"`
+
 		// 容器内无桌面端 Turing SDK，这是把外部生成的 token 注入的入口；空 = 不注入。
 		// 每号覆盖优先级：auths 文件 device_token > 本全局值 > DeviceTokenFile（文件兜底）。
 		DeviceToken string `json:"device_token"`
@@ -268,6 +274,16 @@ func applyEnv(c *Config) {
 			c.Upstream.PassthroughIP = b
 		}
 	}
+	if v := os.Getenv("WB2A_AUTO_CONTINUE_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.AutoContinue.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_AUTO_CONTINUE_MAX"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Upstream.AutoContinue.Max = n
+		}
+	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
@@ -346,6 +362,16 @@ func (c *Config) normalize() error {
 	}
 	if c.Upstream.IdleTimeoutSeconds <= 0 {
 		c.Upstream.IdleTimeoutSeconds = 300
+	}
+	if c.Upstream.AutoContinue.Enabled {
+		if c.Upstream.AutoContinue.Max <= 0 {
+			c.Upstream.AutoContinue.Max = 2
+		}
+		if c.Upstream.AutoContinue.Max > 3 {
+			c.Upstream.AutoContinue.Max = 3
+		}
+	} else {
+		c.Upstream.AutoContinue.Max = 0
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
